@@ -1,0 +1,46 @@
+name: Test Docker conversions
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build -t docbridge:test .
+      - name: Run conversion and isolation tests
+        run: >-
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges
+          --memory 2g --cpus 2 --pids-limit 128 --tmpfs /tmp:size=512m,mode=1777
+          -e REQUIRE_ENGINES=1 docbridge:test python -m unittest discover -s tests -v
+      - name: Test live HTTP API
+        shell: bash
+        run: |
+          export DOCBRIDGE_API_KEY=$(openssl rand -hex 32)
+          docker compose up -d
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz; then break; fi
+            sleep 2
+          done
+          printf 'DocBridge HTTP test\n' > /tmp/input.txt
+          curl --fail-with-body --max-time 200 \
+            -H "Authorization: Bearer $DOCBRIDGE_API_KEY" \
+            -H 'Content-Type: application/octet-stream' \
+            --data-binary @/tmp/input.txt \
+            'http://127.0.0.1:8080/v1/convert?source=txt&target=pdf' -o /tmp/result.pdf
+          test "$(head -c 4 /tmp/result.pdf)" = '%PDF'
+      - name: Package source
+        run: git archive --format=zip --output=DocBridge-source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocBridge-source
+          path: DocBridge-source.zip
+      - name: Stop services
+        if: always()
+        run: docker compose down
